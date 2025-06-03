@@ -232,9 +232,6 @@ def extract_image_data():
             # Extract image metadata
             metadata = extract_image_metadata(file_path)
             
-            # Analyze colors
-            # color_analysis = analyze_image_colors(file_path)
-            
             # Convert annotated image to base64 for response
             with open(annotated_image_path, "rb") as img_file:
                 img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
