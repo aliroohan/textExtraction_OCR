@@ -95,7 +95,6 @@ def extract_image_metadata(image_path):
     except Exception as e:
         return {'error': str(e)}
 
-def analyze_image_colors(image_path):
     """Analyze dominant colors in the image."""
     try:
         # Load image with OpenCV
@@ -150,6 +149,33 @@ def analyze_image_colors(image_path):
     except Exception as e:
         return {'error': str(e)}
 
+
+def draw_text_boxes(image_path, text_data):
+    """Draw boxes around detected text regions."""
+    try:
+        # Read the image
+        img = cv2.imread(image_path)
+        
+        # Draw boxes for each detected text region
+        for item in text_data['detailed_text']:
+            bbox = item['bbox']
+            # Draw rectangle
+            cv2.rectangle(
+                img,
+                (bbox['x'], bbox['y']),
+                (bbox['x'] + bbox['width'], bbox['y'] + bbox['height']),
+                (0, 255, 0),  # Green color
+                2  # Thickness
+            )
+        
+        # Save the annotated image
+        annotated_path = image_path.replace('.', '_annotated.')
+        cv2.imwrite(annotated_path, img)
+        return annotated_path
+    except Exception as e:
+        print(f"Error drawing text boxes: {str(e)}")
+        return image_path
+
 @app.route('/', methods=['GET'])
 def home():
     """Health check endpoint."""
@@ -200,18 +226,23 @@ def extract_image_data():
             # Extract text using OCR
             text_data = extract_text_from_image(file_path)
             
+            # Draw boxes around detected text
+            annotated_image_path = draw_text_boxes(file_path, text_data)
+            
             # Extract image metadata
             metadata = extract_image_metadata(file_path)
             
             # Analyze colors
-            color_analysis = analyze_image_colors(file_path)
+            # color_analysis = analyze_image_colors(file_path)
             
-            # Convert image to base64 for response (optional)
-            with open(file_path, "rb") as img_file:
+            # Convert annotated image to base64 for response
+            with open(annotated_image_path, "rb") as img_file:
                 img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
             
-            # Clean up - remove uploaded file
+            # Clean up - remove uploaded files
             os.remove(file_path)
+            if annotated_image_path != file_path:  # Only remove if it's a different file
+                os.remove(annotated_image_path)
             
             # Prepare response
             response_data = {
@@ -221,16 +252,17 @@ def extract_image_data():
                 'file_size': file_size,
                 'extracted_text': text_data,
                 'metadata': metadata,
-                'color_analysis': color_analysis,
-                'image_base64': img_base64  # Include if you want to return the processed image
+                'image_base64': img_base64  # This now contains the annotated image
             }
             
             return jsonify(response_data)
             
         except Exception as e:
-            # Clean up file if it exists
+            # Clean up files if they exist
             if 'file_path' in locals() and os.path.exists(file_path):
                 os.remove(file_path)
+            if 'annotated_image_path' in locals() and os.path.exists(annotated_image_path) and annotated_image_path != file_path:
+                os.remove(annotated_image_path)
             
             return jsonify({
                 'success': False,
