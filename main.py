@@ -9,13 +9,19 @@ import cv2
 import numpy as np
 from datetime import datetime
 import hashlib
+from pdf2image import convert_from_path
+import tempfile
+from reportlab.pdfgen import canvas
+from reportlab.lib.colors import Color
+from reportlab.lib.pagesizes import letter
+import fitz  # PyMuPDF
 
 app = Flask(__name__)
 CORS(app)
 
 # Configure upload settings
 UPLOAD_FOLDER = 'uploads'
-ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp'}
+ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'bmp', 'tiff', 'webp', 'pdf'}
 MAX_FILE_SIZE = 16 * 1024 * 1024  # 16MB
 
 # Create uploads directory if it doesn't exist
@@ -176,6 +182,111 @@ def draw_text_boxes(image_path, text_data):
         print(f"Error drawing text boxes: {str(e)}")
         return image_path
 
+def extract_text_from_pdf(pdf_path):
+    """Extract text from PDF using OCR."""
+    try:
+        # Convert PDF to images
+        images = convert_from_path(pdf_path)
+        
+        all_text = []
+        all_detailed_text = []
+        
+        # Process each page
+        for i, image in enumerate(images):
+            # Save temporary image
+            with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+                temp_path = temp_file.name
+                image.save(temp_path, 'PNG')
+            
+            # Extract text from the page
+            page_text = extract_text_from_image(temp_path)
+            
+            # Add page number to the results
+            if page_text['success']:
+                all_text.append(f"--- Page {i+1} ---\n{page_text['raw_text']}")
+                for item in page_text['detailed_text']:
+                    item['page'] = i + 1
+                    all_detailed_text.append(item)
+            
+            # Clean up temporary file
+            os.unlink(temp_path)
+        
+        return {
+            'raw_text': '\n\n'.join(all_text),
+            'detailed_text': all_detailed_text,
+            'success': True,
+            'total_pages': len(images)
+        }
+    except Exception as e:
+        return {
+            'raw_text': '',
+            'detailed_text': [],
+            'success': False,
+            'error': str(e)
+        }
+
+def create_annotated_pdf(original_pdf_path, text_data):
+    """Create a new PDF with highlighted text regions."""
+    try:
+        # Open the original PDF
+        doc = fitz.open(original_pdf_path)
+        output_pdf = fitz.open()
+        
+        # Process each page
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            
+            # Create a new page in the output PDF
+            output_page = output_pdf.new_page(width=page.rect.width, height=page.rect.height)
+            
+            # Copy the original page content
+            output_page.show_pdf_page(output_page.rect, doc, page_num)
+            
+            # Get text items for this page
+            page_text_items = [item for item in text_data['detailed_text'] if item['page'] == page_num + 1]
+            
+            # Get the page dimensions
+            page_width = page.rect.width
+            page_height = page.rect.height
+            
+            # Convert PDF to image to get the dimensions Tesseract used
+            images = convert_from_path(original_pdf_path, first_page=page_num+1, last_page=page_num+1)
+            if images:
+                img = images[0]
+                img_width, img_height = img.size
+                
+                # Calculate scaling factors
+                scale_x = page_width / img_width
+                scale_y = page_height / img_height
+                
+                # Draw filled, semi-transparent rectangles around detected text
+                for item in page_text_items:
+                    bbox = item['bbox']
+                    # Scale coordinates to PDF space
+                    rect = fitz.Rect(
+                        bbox['x'] * scale_x,
+                        bbox['y'] * scale_y,
+                        (bbox['x'] + bbox['width']) * scale_x,
+                        (bbox['y'] + bbox['height']) * scale_y
+                    )
+                    
+                    # Add a filled rectangle annotation (semi-transparent green)
+                    annot = output_page.add_rect_annot(rect)
+                    annot.set_colors(stroke=(0, 1, 0), fill=(0, 1, 0))  # Green
+                    annot.set_opacity(0.25)  # 25% opacity
+                    annot.update()
+        
+        # Save the annotated PDF
+        annotated_path = original_pdf_path.replace('.pdf', '_annotated.pdf')
+        output_pdf.save(annotated_path)
+        output_pdf.close()
+        doc.close()
+        
+        return annotated_path
+    except Exception as e:
+        print(f"Error creating annotated PDF: {str(e)}")
+        return original_pdf_path
+
 @app.route('/', methods=['GET'])
 def home():
     """Health check endpoint."""
@@ -190,11 +301,11 @@ def home():
 
 @app.route('/extract', methods=['POST'])
 def extract_image_data():
-    """Extract visual data from uploaded image."""
+    """Extract visual data from uploaded image or PDF."""
     
     # Check if image file is in request
     if 'image' not in request.files:
-        return jsonify({'error': 'No image file provided'}), 400
+        return jsonify({'error': 'No file provided'}), 400
     
     file = request.files['image']
     
@@ -223,23 +334,27 @@ def extract_image_data():
             # Save uploaded file
             file.save(file_path)
             
-            # Extract text using OCR
-            text_data = extract_text_from_image(file_path)
+            # Extract text based on file type
+            if file.filename.lower().endswith('.pdf'):
+                text_data = extract_text_from_pdf(file_path)
+                # Create annotated PDF
+                annotated_file_path = create_annotated_pdf(file_path, text_data)
+            else:
+                text_data = extract_text_from_image(file_path)
+                # Draw boxes around detected text for images
+                annotated_file_path = draw_text_boxes(file_path, text_data)
             
-            # Draw boxes around detected text
-            annotated_image_path = draw_text_boxes(file_path, text_data)
-            
-            # Extract image metadata
+            # Extract metadata
             metadata = extract_image_metadata(file_path)
             
-            # Convert annotated image to base64 for response
-            with open(annotated_image_path, "rb") as img_file:
-                img_base64 = base64.b64encode(img_file.read()).decode('utf-8')
+            # Convert annotated file to base64
+            with open(annotated_file_path, "rb") as f:
+                file_base64 = base64.b64encode(f.read()).decode('utf-8')
             
             # Clean up - remove uploaded files
             os.remove(file_path)
-            if annotated_image_path != file_path:  # Only remove if it's a different file
-                os.remove(annotated_image_path)
+            if annotated_file_path != file_path:  # Only remove if it's a different file
+                os.remove(annotated_file_path)
             
             # Prepare response
             response_data = {
@@ -249,7 +364,7 @@ def extract_image_data():
                 'file_size': file_size,
                 'extracted_text': text_data,
                 'metadata': metadata,
-                'image_base64': img_base64  # This now contains the annotated image
+                'annotated_file_base64': file_base64
             }
             
             return jsonify(response_data)
@@ -258,12 +373,12 @@ def extract_image_data():
             # Clean up files if they exist
             if 'file_path' in locals() and os.path.exists(file_path):
                 os.remove(file_path)
-            if 'annotated_image_path' in locals() and os.path.exists(annotated_image_path) and annotated_image_path != file_path:
-                os.remove(annotated_image_path)
+            if 'annotated_file_path' in locals() and os.path.exists(annotated_file_path) and annotated_file_path != file_path:
+                os.remove(annotated_file_path)
             
             return jsonify({
                 'success': False,
-                'error': f'Error processing image: {str(e)}'
+                'error': f'Error processing file: {str(e)}'
             }), 500
     
     else:
@@ -279,5 +394,5 @@ def too_large(e):
 def internal_error(e):
     return jsonify({'error': 'Internal server error'}), 500
 
-# if __name__ == '__main__':
-#     app.run(debug=True, host='0.0.0.0', port=5000)
+if __name__ == '__main__':
+    app.run(debug=True, host='0.0.0.0', port=5000)

@@ -1,6 +1,10 @@
-Flask
+flask
 flask-cors
 Pillow
 pytesseract
 opencv-python
 numpy
+PyMuPDF
+reportlab
+pdf2image
+scikit-learn
