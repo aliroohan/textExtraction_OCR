@@ -8,3 +8,4 @@ PyMuPDF
 reportlab
 pdf2image
 scikit-learn
+gunicorn
